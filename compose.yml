@@ -11,7 +11,6 @@ volumes:
   kafka-data:
   atlas-data:
   postgres-airflow:
-  airflow-dags:
   airflow-logs:
   airflow-plugins:
 
@@ -21,10 +20,11 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.7.1
+  image: apache/airflow:slim-latest-python3.12
+  user: "${AIRFLOW_UID}:${AIRFLOW_GID}"
   environment: *airflow-env
   volumes:
-    - airflow-dags:/opt/airflow/dags
+    - ./dag:/opt/airflow/dags
     - airflow-logs:/opt/airflow/logs
     - airflow-plugins:/opt/airflow/plugins
   networks:
@@ -179,6 +179,8 @@ services:
       POSTGRES_USER: airflow
       POSTGRES_PASSWORD: airflow
       POSTGRES_DB: airflow
+    ports:
+      - "5432:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "airflow"]
       interval: 5s
