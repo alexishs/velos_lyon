@@ -1,0 +1,222 @@
+version: '3.8'
+
+networks:
+  data-net:
+    driver: bridge
+
+volumes:
+  hdfs-namenode:
+  hdfs-datanode:
+  hive-metastore-db:
+  kafka-data:
+  atlas-data:
+  postgres-airflow:
+  airflow-dags:
+  airflow-logs:
+  airflow-plugins:
+
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
+  AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.7.1
+  environment: *airflow-env
+  volumes:
+    - airflow-dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+    - airflow-plugins:/opt/airflow/plugins
+  networks:
+    - data-net
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+
+services:
+  # --- HDFS ---
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    environment:
+      CLUSTER_NAME: data-cluster
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hdfs-namenode:/hadoop/dfs/name
+    networks:
+      - data-net
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    depends_on:
+      - namenode
+    volumes:
+      - hdfs-datanode:/hadoop/dfs/data
+    networks:
+      - data-net
+
+  # --- MAPREDUCE / YARN ---
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: resourcemanager
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    ports:
+      - "8088:8088"
+    depends_on:
+      - namenode
+      - datanode
+    networks:
+      - data-net
+
+  nodemanager:
+    image: bde2020/hadoop-nodemanager:2.0.0-hadoop3.2.1-java8
+    container_name: nodemanager
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    depends_on:
+      - namenode
+      - datanode
+      - resourcemanager
+    networks:
+      - data-net
+
+  historyserver:
+    image: bde2020/hadoop-historyserver:2.0.0-hadoop3.2.1-java8
+    container_name: historyserver
+    environment:
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    ports:
+      - "8188:8188"
+    depends_on:
+      - namenode
+      - datanode
+    networks:
+      - data-net
+
+  # --- HIVE ---
+  hive-metastore-db:
+    image: bde2020/hive-metastore-postgresql:2.3.0
+    container_name: hive-metastore-db
+    volumes:
+      - hive-metastore-db:/var/lib/postgresql/data
+    networks:
+      - data-net
+
+  hive-metastore:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-metastore
+    environment:
+      HIVE_CORE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-db/metastore"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    ports:
+      - "9083:9083"
+    depends_on:
+      - namenode
+      - datanode
+      - hive-metastore-db
+    networks:
+      - data-net
+
+  hive-server:
+    image: bde2020/hive:2.3.2-postgresql-metastore
+    container_name: hive-server
+    environment:
+      HIVE_CORE_CONF_javax_jdo_option_ConnectionURL: "jdbc:postgresql://hive-metastore-db/metastore"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    ports:
+      - "10000:10000"
+    depends_on:
+      - hive-metastore
+    networks:
+      - data-net
+
+  # --- KAFKA (Mode KRaft, sans ZooKeeper) ---
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_LOG_DIRS: '/var/lib/kafka/data'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    networks:
+      - data-net
+
+  # --- APACHE ATLAS ---
+  atlas:
+    image: sburn/apache-atlas:latest
+    container_name: atlas
+    ports:
+      - "21000:21000"
+    volumes:
+      - atlas-data:/opt/apache-atlas/data
+    networks:
+      - data-net
+
+  # --- AIRFLOW ---
+  postgres-airflow:
+    image: postgres:13
+    container_name: postgres-airflow
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    volumes:
+      - postgres-airflow:/var/lib/postgresql/data
+    networks:
+      - data-net
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
