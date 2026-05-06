@@ -16,13 +16,19 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__EXECUTOR: LocalExecutor
   AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres-airflow/airflow
   AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+  AIRFLOW_CONN_KAFKA_DEFAULT: '{"conn_type": "kafka", "extra": {"bootstrap.servers": "kafka:29092", "group.id": "airflow-sensor", "auto.offset.reset": "earliest"}}'
+  JCDECAUX_API_KEY: ${JCDECAUX_API_KEY}
+  PYTHONPATH: /opt/airflow/lib
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.10.5-python3.12
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
   user: "${AIRFLOW_UID}:0"
   environment: *airflow-env
   volumes:
     - ./dag:/opt/airflow/dags
+    - .:/opt/airflow/lib:ro
     - airflow-logs:/opt/airflow/logs
     - airflow-plugins:/opt/airflow/plugins
   networks:
@@ -245,6 +251,16 @@ services:
       airflow-init:
         condition: service_completed_successfully
 
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
   dev:
     build:
       context: .
@@ -253,6 +269,9 @@ services:
         UID: ${AIRFLOW_UID}
         GID: ${AIRFLOW_UID}
     container_name: dev
+    environment:
+      JCDECAUX_API_KEY: ${JCDECAUX_API_KEY}
+      KAFKA_BROKER: kafka:29092
     volumes:
       - .:/workspace
     working_dir: /workspace
