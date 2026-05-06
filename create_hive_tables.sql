@@ -1,0 +1,1 @@
+-- TODO: créer les tables Hive EXTERNAL pour raw_velo_stations, processed_load_factor et curated_quartiers pointant vers les répertoires HDFS correspondants

@@ -1,0 +1,1 @@
+-- TODO: écrire les 6 requêtes métier (Q1 à Q6) sur les tables Hive et y inclure les résultats obtenus
