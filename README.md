@@ -32,7 +32,8 @@ flowchart TD
         D2[step02_pipeline_velo_dag<br/>AwaitMessageSensor]
         D3[step03_mr1_load_factor_dag<br/>toutes les heures]
         D4[step04_mr2_anomalies_dag<br/>toutes les heures]
-        D5[…MR3 / MR4]
+        D5[step05_mr3_horaire_dag<br/>toutes les heures]
+        D6[…MR4]
     end
 
     API -->|HTTPS toutes les 3 min| D1
@@ -259,19 +260,41 @@ Une seule anomalie est émise par observation (priorité décroissante : `NO_UPD
 
 ---
 
-### Step 05 — MR3 : agrégats horaire/quartier _(à implémenter)_
+### Step 05 — MR3 : agrégats horaire/quartier
 
 **Fichiers** : [step05_mr3_mapper_horaire.py](step05_mr3_mapper_horaire.py), [step05_mr3_reducer_horaire.py](step05_mr3_reducer_horaire.py)
 
 **Contexte** : prédiction des pics de demande par quartier et créneau horaire.
 
-**Objectif** : calculer le 95e percentile du `load_factor` par couple (heure, quartier) ainsi que la capacité totale.
+**Objectif** : agréger les snapshots par couple (heure UTC, arrondissement) et calculer le 95e percentile du `load_factor`, le nombre de stations et la capacité totale. La sortie alimente le décisionnel "où la demande est-elle la plus tendue à telle heure ?".
 
-**Exécution** : Hadoop Streaming via le `nodemanager` (programmée) ou pipeline shell équivalent dans `dev` (manuelle).
+#### Source des contours d'arrondissements
 
-**Entrée** : fichiers JSONL de `/data-lake/raw/velo_lyon/*`
+L'arrondissement est déterminé par **point-in-polygon** sur les contours officiels du dataset [Arrondissements de la commune de Lyon](https://www.data.gouv.fr/fr/datasets/arrondissements-de-la-commune-de-lyon/) publié sur **data.gouv.fr** (producteur : Métropole de Lyon, format GeoJSON, projection EPSG:4326, 9 polygones).
 
-**Sortie** : `/data-lake/processed/horaire/` (à confirmer lors de l'implémentation)
+Le fichier est versionné dans le projet sous [data/arrondissements-lyon.geojson](data/arrondissements-lyon.geojson) (téléchargé depuis l'API data.gouv.fr — voir [data/README.md](data/README.md) pour la commande de mise à jour) et distribué aux nodemanagers via `-files` au moment de la soumission Hadoop. L'algorithme utilisé est un **ray-casting** en pur Python (pas de dépendance externe à installer sur les nodemanagers), supportant les MultiPolygon de GeoJSON.
+
+#### Particularité des stations en banlieue
+
+Le contrat JCDecaux `lyon` couvre **toute la métropole**, pas seulement la ville de Lyon : il inclut Villeurbanne, Vénissieux, Caluire-et-Cuire, et d'autres communes limitrophes. Le dataset des arrondissements ne couvre lui que les **9 arrondissements de Lyon intra-muros**.
+
+Les stations en banlieue (~30-40% du parc Vélo'v) ne tombent dans aucun des 9 polygones et sont donc classées dans une catégorie dédiée **`Hors_Lyon`**. Ce choix est délibéré : plutôt que de les forcer dans l'arrondissement le plus proche (ce qui fausserait les agrégats et masquerait le poids de la banlieue), on les expose explicitement comme un quartier à part entière dans la sortie de MR3.
+
+Conséquence pratique : la sortie peut contenir jusqu'à **10 quartiers** (Lyon1 à Lyon9 + Hors_Lyon) au lieu des 9 mentionnés dans l'énoncé.
+
+#### Implémentation du reducer
+
+L'agrégation côté reducer se fait en mémoire (dictionnaire indexé par `(heure, quartier)`) car Hadoop Streaming en config par défaut ne trie que sur le premier champ. Volume max : 24 heures × 10 quartiers = 240 groupes, soit quelques centaines d'observations chacun — largement tenable en mémoire.
+
+**Exécution** :
+- Manuelle (test) : `cat sample.jsonl | python step05_mr3_mapper_horaire.py | sort | python step05_mr3_reducer_horaire.py` depuis le conteneur `dev`
+- Programmée : DAG Airflow `05_mr3_horaire` (orchestré par [dag/step05_mr3_horaire_dag.py](dag/step05_mr3_horaire_dag.py)). Même mécanisme que MR1/MR2.
+
+**Entrée** : fichiers JSONL de `/data-lake/raw/velo_lyon/*` (une station par ligne)
+
+**Sortie** :
+- Mapper : `heure\tquartier\tload_factor\tcapacite`
+- Reducer : `heure\tquartier\tp95_load\tnb_stations\tcapacite_totale` dans `/data-lake/processed/horaire/`
 
 ---
 
@@ -299,6 +322,7 @@ Les fichiers du dossier `dag/` ne sont pas des étapes du pipeline mais des **or
 - [dag/step02_pipeline_velo_dag.py](dag/step02_pipeline_velo_dag.py) — orchestre Step 02 ; surveille Kafka avec un `AwaitMessageSensor` puis appelle `step02_kafka_consumer.consume_and_write_hdfs`
 - [dag/step03_mr1_load_factor_dag.py](dag/step03_mr1_load_factor_dag.py) — orchestre Step 03 (MR1) ; invoque `hadoop jar` sur le namenode toutes les heures via `docker exec` (cf. note d'architecture en Step 03)
 - [dag/step04_mr2_anomalies_dag.py](dag/step04_mr2_anomalies_dag.py) — orchestre Step 04 (MR2) ; même mécanisme que MR1, sortie dans `/data-lake/processed/anomalies/`
+- [dag/step05_mr3_horaire_dag.py](dag/step05_mr3_horaire_dag.py) — orchestre Step 05 (MR3) ; même mécanisme que MR1, sortie dans `/data-lake/processed/horaire/`
 
 ## Réinitialisation du data lake
 
