@@ -33,7 +33,7 @@ flowchart TD
         D3[step03_mr1_load_factor_dag<br/>toutes les heures]
         D4[step04_mr2_anomalies_dag<br/>toutes les heures]
         D5[step05_mr3_horaire_dag<br/>toutes les heures]
-        D6[…MR4]
+        D6[step06_mr4_heatmap_dag<br/>journalier]
     end
 
     API -->|HTTPS toutes les 3 min| D1
@@ -298,19 +298,39 @@ L'agrégation côté reducer se fait en mémoire (dictionnaire indexé par `(heu
 
 ---
 
-### Step 06 — MR4 : heatmap stratégique _(à implémenter)_
+### Step 06 — MR4 : heatmap stratégique
 
 **Fichiers** : [step06_mr4_mapper_heatmap.py](step06_mr4_mapper_heatmap.py), [step06_mr4_reducer_heatmap.py](step06_mr4_reducer_heatmap.py)
 
-**Contexte** : aide à la décision pour l'arbitrage d'investissement de 5M€.
+**Contexte** : aide à la décision pour l'arbitrage d'investissement de 5M€ — où renforcer le parc Vélo'v ?
 
-**Objectif** : identifier les quartiers prioritaires et les stations sous-équipées en croisant utilisation et chiffre d'affaires potentiel.
+**Objectif** : agréger les utilisations par arrondissement et calculer un chiffre d'affaires potentiel annuel pour identifier les zones sous-équipées :
+- `utilisation` (%) = `avg_load_factor × 100` (même calcul que dans MR1)
+- `ca_potentiel` (€) = `avg_load_factor × bike_stands × 2 × 365` (2€/jour × 365 jours par emplacement)
+- `priorite` = `1` si CA potentiel total du quartier > 500 000 €, sinon `0`
 
-**Exécution** : Hadoop Streaming via le `nodemanager` (programmée) ou pipeline shell équivalent dans `dev` (manuelle).
+#### Particularités d'implémentation
 
-**Entrée** : sortie de MR1 (load factor par station) et données stations enrichies
+**Le mapper agrège par station, pas par snapshot.** L'énoncé précise que `utilisation` est un avg_load_factor (donc nécessite plusieurs observations par station). Le mapper bufferise donc tous ses inputs en mémoire pour calculer la moyenne par station avant émission. Hypothèse : Hadoop Streaming n'utilise qu'**un seul mapper** sur ce volume (vrai par défaut puisque les fichiers JSONL totalisent moins que la taille de split par défaut de 128 Mo). Approche acceptable pour ce TP avec ~250 stations × N snapshots = quelques milliers de records.
 
-**Sortie** : `/data-lake/analytics/heatmap/` (à confirmer lors de l'implémentation)
+**Le mapper émet 5 champs au lieu des 4 spécifiés**. La spec littérale (`quartier|utilisation|ca_potentiel|nom_station`) ne permet pas au reducer de calculer `capacite_totale` sans back-calculer `bike_stands` depuis `ca_potentiel` (fragile, division par zéro si utilisation = 0). On ajoute `bike_stands` en 5e position. Cette légère extension est documentée dans le code.
+
+**L'arrondissement est déterminé par point-in-polygon** sur le même GeoJSON que MR3 ([data/arrondissements-lyon.geojson](data/arrondissements-lyon.geojson)). Les fonctions de chargement et de test sont dupliquées dans le mapper plutôt que partagées via un module : Hadoop Streaming distribue les fichiers individuellement aux nodemanagers, un partage par module nécessiterait un setup supplémentaire (PYTHONPATH côté tâche, packaging…).
+
+**Les stations en banlieue** (cf. MR3) sont catégorisées `Hors_Lyon` et apparaissent comme un quartier à part dans la sortie. En pratique, sur de longues fenêtres temporelles, leur masse cumulée peut atteindre des CA potentiels élevés et déclencher la priorité 1, ce qui reflète bien la réalité opérationnelle.
+
+#### Exécution
+
+- Manuelle (test) : `cat sample.jsonl | python step06_mr4_mapper_heatmap.py | sort | python step06_mr4_reducer_heatmap.py` depuis le conteneur `dev`
+- Programmée : DAG Airflow `06_mr4_heatmap` (orchestré par [dag/step06_mr4_heatmap_dag.py](dag/step06_mr4_heatmap_dag.py)). **Schedule journalier** (à la différence de MR1/MR2/MR3 qui tournent toutes les heures) car la heatmap stratégique alimente une décision long terme, pas du monitoring temps réel.
+
+**Entrée** : fichiers JSONL de `/data-lake/raw/velo_lyon/*` + GeoJSON arrondissements (distribués via `-files`)
+
+**Sortie** :
+- Mapper : `quartier\tutilisation\tca_potentiel\tnom_station\tbike_stands`
+- Reducer : `quartier\tnb_stations\tcapacite_totale\tca_potentiel_total\tpriorite` dans `/data-lake/analytics/heatmap/`
+
+À noter que la sortie de MR4 est sous `/data-lake/analytics/`, et non `/data-lake/processed/` comme MR1/MR2/MR3 — la heatmap est un dataset analytique pour la direction, pas une donnée intermédiaire de pipeline.
 
 ---
 
@@ -323,6 +343,7 @@ Les fichiers du dossier `dag/` ne sont pas des étapes du pipeline mais des **or
 - [dag/step03_mr1_load_factor_dag.py](dag/step03_mr1_load_factor_dag.py) — orchestre Step 03 (MR1) ; invoque `hadoop jar` sur le namenode toutes les heures via `docker exec` (cf. note d'architecture en Step 03)
 - [dag/step04_mr2_anomalies_dag.py](dag/step04_mr2_anomalies_dag.py) — orchestre Step 04 (MR2) ; même mécanisme que MR1, sortie dans `/data-lake/processed/anomalies/`
 - [dag/step05_mr3_horaire_dag.py](dag/step05_mr3_horaire_dag.py) — orchestre Step 05 (MR3) ; même mécanisme que MR1, sortie dans `/data-lake/processed/horaire/`
+- [dag/step06_mr4_heatmap_dag.py](dag/step06_mr4_heatmap_dag.py) — orchestre Step 06 (MR4) ; schedule journalier, sortie dans `/data-lake/analytics/heatmap/`
 
 ## Réinitialisation du data lake
 
