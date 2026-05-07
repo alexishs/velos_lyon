@@ -18,6 +18,7 @@ x-airflow-env: &airflow-env
   AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
   AIRFLOW_CONN_KAFKA_DEFAULT: '{"conn_type": "kafka", "extra": {"bootstrap.servers": "kafka:29092", "group.id": "airflow-sensor", "auto.offset.reset": "earliest"}}'
   JCDECAUX_API_KEY: ${JCDECAUX_API_KEY}
+  KAFKA_BROKER: kafka:29092
   PYTHONPATH: /opt/airflow/lib
 
 x-airflow-common: &airflow-common
@@ -25,12 +26,17 @@ x-airflow-common: &airflow-common
     context: .
     dockerfile: Dockerfile.airflow
   user: "${AIRFLOW_UID}:0"
+  # ajout du groupe docker de l'hôte pour permettre l'accès au socket Docker
+  group_add:
+    - "${DOCKER_GID}"
   environment: *airflow-env
   volumes:
     - ./dag:/opt/airflow/dags
     - .:/opt/airflow/lib:ro
     - airflow-logs:/opt/airflow/logs
     - airflow-plugins:/opt/airflow/plugins
+    # socket Docker monté en lecture-écriture pour permettre `docker exec` depuis les DAGs
+    - /var/run/docker.sock:/var/run/docker.sock
   networks:
     - data-net
   depends_on:
@@ -47,11 +53,19 @@ services:
     environment:
       CLUSTER_NAME: data-cluster
       CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      # bascule la soumission MapReduce vers YARN au lieu du LocalJobRunner par défaut
+      MAPRED_CONF_mapreduce_framework_name: yarn
+      YARN_CONF_yarn_resourcemanager_hostname: resourcemanager
+      # nécessaire avec Hadoop 3.x sur YARN : indique aux conteneurs YARN où trouver les libs MapReduce
+      MAPRED_CONF_yarn_app_mapreduce_am_env: HADOOP_MAPRED_HOME=/opt/hadoop-3.2.1
+      MAPRED_CONF_mapreduce_map_env: HADOOP_MAPRED_HOME=/opt/hadoop-3.2.1
+      MAPRED_CONF_mapreduce_reduce_env: HADOOP_MAPRED_HOME=/opt/hadoop-3.2.1
     ports:
       - "9870:9870"
       - "9000:9000"
     volumes:
       - hdfs-namenode:/hadoop/dfs/name
+      - .:/workspace:ro             # accès aux scripts mapper/reducer pour la soumission Hadoop Streaming
     networks:
       - data-net
 
@@ -73,6 +87,7 @@ services:
     container_name: resourcemanager
     environment:
       CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      YARN_CONF_yarn_resourcemanager_hostname: resourcemanager
     ports:
       - "8088:8088"
     depends_on:
@@ -89,6 +104,10 @@ services:
     restart: unless-stopped
     environment:
       CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      YARN_CONF_yarn_resourcemanager_hostname: resourcemanager
+      # auxiliary service requis par MapReduce sur YARN pour le shuffle intermédiaire
+      # (les triples underscores dans bde2020 = tirets dans les noms de propriété Hadoop)
+      YARN_CONF_yarn_nodemanager_aux___services: mapreduce_shuffle
     depends_on:
       namenode:
         condition: service_healthy
@@ -274,6 +293,7 @@ services:
       KAFKA_BROKER: kafka:29092
     volumes:
       - .:/workspace
+      - airflow-logs:/airflow-logs   # accès en lecture/écriture aux logs Airflow pour le script de reset
     working_dir: /workspace
     networks:
       - data-net

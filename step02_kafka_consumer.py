@@ -1,3 +1,5 @@
+# Exécuté par : dev (test manuel) / airflow-scheduler + airflow-triggerer (DAG pipeline_velo_lyon)
+
 import json
 import os
 from datetime import datetime, timezone
@@ -60,16 +62,20 @@ def consume_and_write_hdfs(
         f"{namenode_url}/webhdfs/v1{hdfs_dir}?op=MKDIRS&user.name=root"
     ).raise_for_status()
 
+    # format JSONL : une station par ligne, attendu par Hadoop Streaming
+    # qui distribue chaque ligne au mapper individuellement
+    stations = messages[-1]  # on écrit uniquement le dernier snapshot
+    payload = "\n".join(json.dumps(s) for s in stations).encode("utf-8")
+
     # WebHDFS fonctionne en deux étapes : le namenode répond avec un redirect (307)
     # vers le datanode qui stocke effectivement le bloc
-    payload = json.dumps(messages[-1]).encode("utf-8")  # on écrit uniquement le dernier snapshot
     r = requests.put(
         f"{namenode_url}/webhdfs/v1{hdfs_path}?op=CREATE&user.name=root&overwrite=true",
         allow_redirects=False,  # ne pas suivre automatiquement : on doit envoyer les données à la seconde URL
     )
     requests.put(r.headers["Location"], data=payload).raise_for_status()
 
-    return len(messages[-1])
+    return len(stations)
 
 
 def main():

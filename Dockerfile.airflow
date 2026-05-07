@@ -1,5 +1,12 @@
 FROM apache/airflow:2.10.5-python3.12
 
+# CLI Docker pour permettre aux DAGs d'invoquer des commandes via `docker exec` sur les autres conteneurs
+# (notamment lancer les jobs Hadoop Streaming sur le namenode)
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends docker.io \
+    && rm -rf /var/lib/apt/lists/*
+USER airflow
+
 RUN pip install --no-cache-dir \
     "apache-airflow-providers-apache-kafka" \
     --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.5/constraints-3.12.txt"

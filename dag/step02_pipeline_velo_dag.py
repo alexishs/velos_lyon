@@ -1,3 +1,5 @@
+# Exécuté par : airflow-scheduler / airflow-webserver / airflow-triggerer (sensor deferrable)
+
 from datetime import datetime, timedelta
 
 from airflow import DAG
@@ -6,7 +8,7 @@ from airflow.providers.apache.kafka.sensors.kafka import AwaitMessageSensor
 
 # le module kafka_consumer est mis à disposition d'Airflow via le mount /opt/airflow/lib
 # référencé dans PYTHONPATH (cf. compose.yml)
-from kafka_consumer import TOPIC, consume_and_write_hdfs
+from step02_kafka_consumer import TOPIC, consume_and_write_hdfs
 
 
 def tout_message(message):
@@ -29,7 +31,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id="pipeline_velo_lyon",
+    dag_id="02_pipeline_velo_lyon",
     default_args=default_args,
     start_date=datetime(2024, 1, 1),
     schedule_interval=timedelta(minutes=3),
@@ -42,7 +44,7 @@ with DAG(
         task_id="attendre_donnees_kafka",
         topics=[TOPIC],
         kafka_config_id="kafka_default",              # connexion définie via AIRFLOW_CONN_KAFKA_DEFAULT dans le compose
-        apply_function="pipeline_velo.tout_message",  # chemin modulaire requis par le sensor (pas un callable direct)
+        apply_function="step02_pipeline_velo_dag.tout_message",  # chemin modulaire requis par le sensor (pas un callable direct)
         poll_interval=30,                             # intervalle entre deux sondes Kafka (secondes)
         execution_timeout=timedelta(minutes=2, seconds=30),  # abandonne avant le prochain cycle DAG
     )

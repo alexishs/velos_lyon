@@ -1,3 +1,5 @@
+# Exécuté par : dev (test manuel) / airflow-scheduler (DAG kafka_producer_velo)
+
 import json
 import os
 

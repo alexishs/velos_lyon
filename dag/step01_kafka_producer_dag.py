@@ -1,3 +1,5 @@
+# Exécuté par : airflow-scheduler / airflow-webserver
+
 from datetime import datetime, timedelta
 
 from airflow import DAG
@@ -5,7 +7,7 @@ from airflow.operators.python import PythonOperator
 
 # le module kafka_producer est mis à disposition d'Airflow via le mount /opt/airflow/lib
 # référencé dans PYTHONPATH (cf. compose.yml)
-from kafka_producer import fetch_and_publish, TOPIC
+from step01_kafka_producer import fetch_and_publish, TOPIC
 
 
 def publier():
@@ -20,7 +22,7 @@ default_args = {
 }
 
 with DAG(
-    dag_id="kafka_producer_velo",
+    dag_id="01_kafka_producer_velo",
     default_args=default_args,
     start_date=datetime(2024, 1, 1),
     schedule_interval=timedelta(minutes=3),  # même cadence que la version standalone
