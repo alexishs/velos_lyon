@@ -31,7 +31,8 @@ flowchart TD
         D1[step01_kafka_producer_dag<br/>toutes les 3 min]
         D2[step02_pipeline_velo_dag<br/>AwaitMessageSensor]
         D3[step03_mr1_load_factor_dag<br/>toutes les heures]
-        D4[…MR2 / MR3 / MR4]
+        D4[step04_mr2_anomalies_dag<br/>toutes les heures]
+        D5[…MR3 / MR4]
     end
 
     API -->|HTTPS toutes les 3 min| D1
@@ -233,19 +234,28 @@ Deux options ont été envisagées pour déclencher des jobs Hadoop Streaming de
 
 ---
 
-### Step 04 — MR2 : détection d'anomalies _(à implémenter)_
+### Step 04 — MR2 : détection d'anomalies
 
 **Fichiers** : [step04_mr2_mapper_anomalies.py](step04_mr2_mapper_anomalies.py), [step04_mr2_reducer_anomalies.py](step04_mr2_reducer_anomalies.py)
 
 **Contexte** : alerter l'équipe maintenance avant que les usagers ne se plaignent.
 
-**Objectif** : détecter trois types d'anomalies (`NO_UPDATE`, `ZERO_BIKES`, `FULL_STANDS`) et calculer un score de fiabilité par station.
+**Objectif** : détecter trois types d'anomalies par snapshot puis agréger par station :
+- `NO_UPDATE` : `last_update` plus vieux que 30 minutes (capteur muet, borne déconnectée)
+- `FULL_STANDS` : `available_bikes == bike_stands` (station saturée, plus de place pour déposer)
+- `ZERO_BIKES` : station ouverte avec aucun vélo disponible (manque à réapprovisionner)
 
-**Exécution** : Hadoop Streaming via le `nodemanager` (programmée) ou pipeline shell équivalent dans `dev` (manuelle).
+Une seule anomalie est émise par observation (priorité décroissante : `NO_UPDATE` > `FULL_STANDS` > `ZERO_BIKES`). Le reducer calcule la fiabilité = `(total - nb_anomalies) / total × 100` et conserve le type de la panne la plus récente. L'API JCDecaux v1 est utilisée, cohérente avec le reste du pipeline.
 
-**Entrée** : fichiers JSONL de `/data-lake/raw/velo_lyon/*`
+**Exécution** :
+- Manuelle (test) : `cat sample.jsonl | python step04_mr2_mapper_anomalies.py | sort | python step04_mr2_reducer_anomalies.py` depuis le conteneur `dev`
+- Programmée : DAG Airflow `04_mr2_anomalies` (orchestré par [dag/step04_mr2_anomalies_dag.py](dag/step04_mr2_anomalies_dag.py)) qui invoque `hadoop jar ... hadoop-streaming` sur le `namenode` via `docker exec`. Même mécanisme que MR1.
 
-**Sortie** : `/data-lake/processed/anomalies/` (à confirmer lors de l'implémentation)
+**Entrée** : fichiers JSONL de `/data-lake/raw/velo_lyon/*` (une station par ligne)
+
+**Sortie** :
+- Mapper : `station_id\tanomaly_type\ttimestamp\tage_last_update`
+- Reducer : `station_id\tfiabilite_pourcent\tnb_anomalies\tderniere_panne` dans `/data-lake/processed/anomalies/`
 
 ---
 
@@ -288,6 +298,7 @@ Les fichiers du dossier `dag/` ne sont pas des étapes du pipeline mais des **or
 - [dag/step01_kafka_producer_dag.py](dag/step01_kafka_producer_dag.py) — orchestre Step 01 ; importe et appelle `step01_kafka_producer.fetch_and_publish` toutes les 3 minutes
 - [dag/step02_pipeline_velo_dag.py](dag/step02_pipeline_velo_dag.py) — orchestre Step 02 ; surveille Kafka avec un `AwaitMessageSensor` puis appelle `step02_kafka_consumer.consume_and_write_hdfs`
 - [dag/step03_mr1_load_factor_dag.py](dag/step03_mr1_load_factor_dag.py) — orchestre Step 03 (MR1) ; invoque `hadoop jar` sur le namenode toutes les heures via `docker exec` (cf. note d'architecture en Step 03)
+- [dag/step04_mr2_anomalies_dag.py](dag/step04_mr2_anomalies_dag.py) — orchestre Step 04 (MR2) ; même mécanisme que MR1, sortie dans `/data-lake/processed/anomalies/`
 
 ## Réinitialisation du data lake
 

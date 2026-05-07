@@ -117,7 +117,7 @@ OUTPUT : station_id|anomaly_type|timestamp|age_last_update
 3 anomalies détectées :
 1. `NO_UPDATE` si last_update > 30min
 2. `ZERO_BIKES` si status=OPEN et available_bikes=0 > 2h consécutifs
-3. `FULL_STANDS` si available_bike_stands = bike_stands
+3. `FULL_STANDS` si available_bikes = bike_stands
 
 Exemple : `"2010\tNO_UPDATE\t1712473200\t7800"`
 
