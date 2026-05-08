@@ -345,6 +345,55 @@ Les fichiers du dossier `dag/` ne sont pas des étapes du pipeline mais des **or
 - [dag/step05_mr3_horaire_dag.py](dag/step05_mr3_horaire_dag.py) — orchestre Step 05 (MR3) ; même mécanisme que MR1, sortie dans `/data-lake/processed/horaire/`
 - [dag/step06_mr4_heatmap_dag.py](dag/step06_mr4_heatmap_dag.py) — orchestre Step 06 (MR4) ; schedule journalier, sortie dans `/data-lake/analytics/heatmap/`
 
+## Tables Hive et requêtes métier
+
+### Trois tables EXTERNAL (livrable de l'énoncé)
+
+Trois tables Hive externes mappent les datasets HDFS produits par le pipeline. Aucune donnée n'est dupliquée dans Hive — ce sont uniquement des vues SQL au-dessus des fichiers existants. Création dans [create_hive_tables.sql](create_hive_tables.sql).
+
+| Table | Localisation HDFS | Format | Source |
+|---|---|---|---|
+| `raw_velo_stations` | `/data-lake/raw/velo_lyon/` | JSONL (JsonSerDe + lecture récursive) | Step 02 (consumer Kafka → HDFS) |
+| `processed_load_factor` | `/data-lake/processed/load_metrics/` | TSV | Step 03 (MR1) |
+| `curated_quartiers` | `/data-lake/processed/horaire/` | TSV | Step 05 (MR3, par heure × arrondissement) |
+
+La lecture récursive des sous-répertoires de `raw_velo_stations` est activée par les deux SET au début du fichier (`hive.mapred.supports.subdirectories=true`, `mapreduce.input.fileinputformat.input.dir.recursive=true`).
+
+### Six requêtes métier
+
+Les 6 questions de l'énoncé sont implémentées dans [requetes_metier.sql](requetes_metier.sql) :
+
+- **Q1** — 15 stations sans vélo, par capacité décroissante (latest snapshot via `ROW_NUMBER()`)
+- **Q2** — 5 quartiers les plus en tension (`nb_vides × capacité_totale`)
+- **Q3** — Variation des vélos à la station 2010 sur 10 minutes (différence entre la première et la dernière observation de la fenêtre)
+- **Q4** — Stations sans données > 2h ou à zéro vélo > 4h (`UNION ALL` de deux conditions)
+- **Q5** — Arrondissements à taux > 85% ET moins de 15 places libres en moyenne
+- **Q6** — Proportion des observations avec coordonnées GPS et statut valides
+
+#### Particularité : rattachement station → arrondissement en SQL
+
+Les questions Q2 et Q5 ont besoin de regrouper par arrondissement, alors que la table `raw_velo_stations` ne contient que `position.lat` et `position.lng`. Hive ne disposant pas de fonction *point-in-polygon* native (pas d'UDF géospatial sans installation supplémentaire), on utilise un `CASE WHEN` priorisant les **bounding boxes** des arrondissements **de la plus petite à la plus grande** pour limiter les chevauchements. Les bornes proviennent du GeoJSON officiel data.gouv.fr (cf. [data/README.md](data/README.md)).
+
+Approximation acceptée : une station dont la position tombe dans la bbox d'un arrondissement mais hors de son polygone réel sera mal classée. L'ordre par taille croissante (Lyon1 d'abord, Lyon2 en dernier) limite cet effet pour les arrondissements compacts. Les stations en banlieue (hors de toutes les bboxes) sont étiquetées `Hors_Lyon`, comme dans MR3 et MR4.
+
+#### Exécution
+
+Depuis le conteneur `hive-server` (le plus simple) :
+
+```bash
+docker exec hive-server bash -c 'beeline -u "jdbc:hive2://localhost:10000" -f /opt/hive/scripts/create_hive_tables.sql'
+docker exec hive-server bash -c 'beeline -u "jdbc:hive2://localhost:10000" -f /opt/hive/scripts/requetes_metier.sql'
+```
+
+Note : il faut au préalable copier les fichiers SQL dans le conteneur (`docker cp` ou via un mount). Une variante plus directe est de piper le contenu via stdin :
+
+```bash
+cat create_hive_tables.sql | docker exec -i hive-server beeline -u "jdbc:hive2://localhost:10000"
+cat requetes_metier.sql    | docker exec -i hive-server beeline -u "jdbc:hive2://localhost:10000"
+```
+
+Depuis le conteneur `dev`, on peut aussi se connecter via `pyhive` ou directement avec un client JDBC, mais beeline depuis hive-server reste l'approche la plus stable pour cette stack.
+
 ## Réinitialisation du data lake
 
 Le script [reset_data_lake.sh](reset_data_lake.sh) supprime toutes les données accumulées dans HDFS et Kafka, puis recrée les structures vides. Utile pour repartir d'un état propre lors du développement, par exemple après un changement de format ou pour purger des données de test.
