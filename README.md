@@ -36,7 +36,7 @@ flowchart TD
         D6[step06_mr4_heatmap_dag<br/>journalier]
     end
 
-    API -->|HTTPS toutes les 3 min| D1
+    D1 -->|poll HTTPS toutes les 3 min| API
     D1 -->|produce| KAFKA
     KAFKA -->|consume| D2
     D2 -->|WebHDFS| RAW
@@ -113,6 +113,8 @@ Le conteneur `dev` résout les deux problèmes : il est sur `data-net` et peut d
 
 ## Initialisation du data lake HDFS
 
+Cette étape n'est nécessaire qu'**au tout premier démarrage** de la stack. En usage courant, le script [reset_data_lake.sh](reset_data_lake.sh) (cf. section *Réinitialisation*) recrée l'arborescence à chaque exécution, ces commandes manuelles ne sont donc pas à rejouer.
+
 Les répertoires HDFS sont créés via l'API REST WebHDFS exposée par le namenode sur le port 9870.
 
 Ces commandes sont exécutées depuis le conteneur `dev` car le namenode n'est pas accessible par son nom de service (`namenode`) en dehors du réseau Docker `data-net`. Depuis l'hôte, le port 9870 est bien exposé mais WebHDFS effectue des redirections internes vers le datanode (non exposé), ce qui provoquerait des erreurs. Passer par le conteneur `dev` évite ce problème de résolution réseau.
@@ -145,13 +147,15 @@ Kafka joue le rôle de tampon entre l'API JCDecaux et le stockage HDFS. Un produ
 
 ### Topic
 
-Le topic `velo_lyon_raw` a été créé avec la commande suivante :
+Le topic `velo_lyon_raw` a été créé avec la commande suivante. Comme pour l'initialisation HDFS, cette étape n'est utile qu'au premier démarrage : `reset_data_lake.sh` recrée le topic à chaque exécution.
 
 ```bash
-docker exec kafka kafka-topics --bootstrap-server kafka:9092 \
+docker exec kafka kafka-topics --bootstrap-server kafka:29092 \
   --create --topic velo_lyon_raw \
   --partitions 1 --replication-factor 1
 ```
+
+Le port `29092` correspond au listener interne `PLAINTEXT` du broker, accessible depuis le réseau Docker `data-net` (cf. `KAFKA_LISTENERS` dans [compose.yml](compose.yml)). Le port `9092` exposé sur l'hôte n'est utile que pour les clients externes au réseau Docker.
 
 ### Producer
 
@@ -404,14 +408,30 @@ Le script [reset_data_lake.sh](reset_data_lake.sh) supprime toutes les données 
 ./reset_data_lake.sh
 ```
 
-Le script effectue cinq opérations :
-1. Supprime récursivement `/data-lake/raw`, `/data-lake/processed` et `/data-lake/analytics` dans HDFS (via WebHDFS)
-2. Recrée les trois répertoires vides
-3. Supprime puis recrée le topic Kafka `velo_lyon_raw` (via l'AdminClient confluent-kafka, équivalent de `kafka-topics --delete`)
-4. Truncate les tables d'historique d'Airflow dans `postgres-airflow` (`dag_run`, `task_instance`, `xcom`, `log`, etc.) via le client `psql` (installé dans le conteneur dev). Les utilisateurs, connexions et variables sont préservés.
-5. Purge les logs Airflow sur disque (le volume `airflow-logs` est monté dans le conteneur dev sous `/airflow-logs`)
+Le script effectue six opérations :
+1. Met en pause tous les DAGs dans `postgres-airflow` (`UPDATE dag SET is_paused = true`) pour éviter que le scheduler ne réinsère des `dag_run`/`log` pendant le nettoyage et ne recrée des dossiers dans `/airflow-logs` juste après leur purge. Les DAGs restent en pause à la fin : l'opérateur choisit quoi relancer.
+2. Supprime récursivement `/data-lake/raw`, `/data-lake/processed` et `/data-lake/analytics` dans HDFS (via WebHDFS)
+3. Recrée les trois répertoires vides
+4. Supprime puis recrée le topic Kafka `velo_lyon_raw` (via l'AdminClient confluent-kafka, équivalent de `kafka-topics --delete`)
+5. Truncate les tables d'historique d'Airflow dans `postgres-airflow` (`dag_run`, `task_instance`, `xcom`, `log`, etc.) via le client `psql` (installé dans le conteneur dev). Les utilisateurs, connexions et variables sont préservés.
+6. Purge les logs Airflow sur disque (le volume `airflow-logs` est monté dans le conteneur dev sous `/airflow-logs`)
 
-> **Attention** : avant de lancer le reset, mettre en pause tous les DAGs dans Airflow pour qu'aucun n'écrive pendant le nettoyage.
+> **Note** : après le reset, rafraîchir l'UI Airflow (Ctrl+Shift+R) pour vider le cache navigateur.
+
+### Redémarrage du pipeline après reset
+
+Le script [restart_pipeline.sh](restart_pipeline.sh) automatise la remise en route des DAGs dans le bon ordre. À exécuter depuis le conteneur `dev` juste après le reset :
+
+```bash
+./restart_pipeline.sh
+```
+
+Le script effectue trois opérations :
+1. Dépause `01_kafka_producer_velo` et `02_pipeline_velo_lyon` (chaîne d'ingestion : Kafka producer puis consumer-vers-HDFS).
+2. Attend (polling WebHDFS, timeout 7 min) qu'au moins un snapshot `.json` apparaisse dans `/data-lake/raw/velo_lyon/`. Cette attente est nécessaire car le pipeline 02 met jusqu'à 3 minutes (un cycle complet) avant d'écrire le premier fichier.
+3. Dépause ensuite les MRs `03_mr1_load_factor`, `04_mr2_anomalies`, `05_mr3_horaire` et `06_mr4_heatmap`.
+
+> **Pourquoi cette séquence** : les MRs ont un `schedule_interval` horaire (`03`, `04`, `05`) ou journalier (`06`). Au dépausage, le scheduler crée immédiatement un run pour la dernière fenêtre passée. Si ce run se lance avant que HDFS contienne au moins un fichier, le mapper échoue avec `Input Pattern matches 0 files` (exit code 5) et reste en rouge (`retries=0`). En attendant la présence effective d'un snapshot avant de dépauser les MRs, on garantit que leur premier run aura des données à traiter.
 
 ## URLs disponibles
 
