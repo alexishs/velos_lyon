@@ -17,14 +17,16 @@ def emit(quartier, nb_stations, capacite_totale, ca_potentiel_total):
     if quartier is None or nb_stations == 0:
         return
 
-    # priorité d'investissement : seuil de 500 000 € de CA potentiel annuel
-    priorite = 1 if ca_potentiel_total > 500_000 else 0
+    # priorité d'investissement : seuil de 500 000 € de CA potentiel annuel.
+    # Pas de séparateurs `_` dans les littéraux : Python 3.5 sur les conteneurs Hadoop
+    # (PEP 515 nécessite Python 3.6+, sinon SyntaxError dans le mapper/reducer).
+    priorite = 1 if ca_potentiel_total > 500000 else 0
 
     # affichage compact : 2.1M€ pour les valeurs ≥ 1M, 740k€ entre 1k et 1M, sinon en €
-    if ca_potentiel_total >= 1_000_000:
-        ca_str = "{:.1f}M€".format(ca_potentiel_total / 1_000_000)
-    elif ca_potentiel_total >= 1_000:
-        ca_str = "{:.0f}k€".format(ca_potentiel_total / 1_000)
+    if ca_potentiel_total >= 1000000:
+        ca_str = "{:.1f}M€".format(ca_potentiel_total / 1000000)
+    elif ca_potentiel_total >= 1000:
+        ca_str = "{:.0f}k€".format(ca_potentiel_total / 1000)
     else:
         ca_str = "{:.0f}€".format(ca_potentiel_total)
 

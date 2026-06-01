@@ -42,12 +42,17 @@ with DAG(
     # Soumission du job au cluster YARN via le client Hadoop installé dans le conteneur namenode.
     # Voir step03_mr1_load_factor_dag.py pour le détail de l'invocation via docker exec.
     # Le GeoJSON est ajouté à -files car le mapper en a besoin pour le point-in-polygon.
+    # -cmdenv PYTHONIOENCODING=utf-8 : sans cela, sys.stdout du mapper/reducer est en ASCII
+    # dans les conteneurs YARN (locale non définie) et tout print contenant '€' ou un nom
+    # de station accentué lève UnicodeEncodeError. Spécifique à MR4 qui émet ces caractères ;
+    # les autres MRs n'impriment que de l'ASCII.
     lancer_mr4 = BashOperator(
         task_id="lancer_mr4",
         bash_command=dedent(f"""
             docker exec {NAMENODE} bash -c '
               hadoop jar {HADOOP_JAR} \\
                 -files {WORKSPACE}/{MAPPER},{WORKSPACE}/{REDUCER},{WORKSPACE}/{GEOJSON} \\
+                -cmdenv PYTHONIOENCODING=utf-8 \\
                 -input "{INPUT_GLOB}" \\
                 -output {OUTPUT_PATH} \\
                 -mapper "python3 {MAPPER}" \\
